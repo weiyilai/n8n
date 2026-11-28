@@ -527,6 +527,101 @@ export function getLatestAppArtifactResult(
 	return getLatestToolArtifactResult(turns, getAppArtifactFromToolCall);
 }
 
+/** `DOMAIN_TOOL_IDS.CUSTOM_MCP_SERVERS` in `@n8n/instance-ai`, which the editor does not import. */
+export const CUSTOM_MCP_SERVERS_TOOL_NAME = 'custom-mcp-servers';
+
+export interface McpServerLookupEntry {
+	id: string;
+	name: string;
+	projectId?: string;
+}
+
+export type McpServerMutationEvent =
+	| { toolCallId: string; serverId: string; kind: 'deleted' }
+	| {
+			toolCallId: string;
+			serverId: string;
+			kind: 'created' | 'mutated';
+			name: string;
+			projectId?: string;
+	  };
+
+function toMcpServerLookupEntry(value: unknown): McpServerLookupEntry | undefined {
+	if (!isRecord(value) || typeof value.id !== 'string' || typeof value.name !== 'string') {
+		return undefined;
+	}
+	const name = value.name.trim();
+	if (!name) return undefined;
+	const projectId =
+		typeof value.projectId === 'string' && value.projectId.trim() !== ''
+			? value.projectId
+			: undefined;
+	return { id: value.id, name, ...(projectId ? { projectId } : {}) };
+}
+
+/** Servers named in a `custom-mcp-servers` list or get result, for name linking and metadata lookup. */
+export function getMcpServerLookupEntriesFromToolCall(
+	tc: ArtifactToolCall,
+): McpServerLookupEntry[] {
+	if (tc.toolName !== CUSTOM_MCP_SERVERS_TOOL_NAME || tc.isLoading) return [];
+	const result = unwrapUntrustedToolResult(tc.result);
+	if (!isRecord(result)) return [];
+	if (Array.isArray(result.servers)) {
+		return result.servers
+			.map(toMcpServerLookupEntry)
+			.filter((entry): entry is McpServerLookupEntry => entry !== undefined);
+	}
+	const single = toMcpServerLookupEntry(result.server);
+	return single ? [single] : [];
+}
+
+/**
+ * The custom MCP server that a finished `custom-mcp-servers` write created, mutated, or deleted.
+ * Denied, refused, failed, or read-only calls return `undefined`.
+ */
+export function getMcpServerMutationEventFromToolCall(
+	tc: ArtifactToolCall,
+): McpServerMutationEvent | undefined {
+	if (tc.toolName !== CUSTOM_MCP_SERVERS_TOOL_NAME || tc.isLoading) return undefined;
+	const result = unwrapUntrustedToolResult(tc.result);
+	if (!isRecord(result) || result.success !== true) return undefined;
+
+	const action = typeof tc.args?.action === 'string' ? tc.args.action : undefined;
+	if (action !== 'create' && result.serverMutated !== true) return undefined;
+
+	if (action === 'delete') {
+		return typeof result.serverId === 'string'
+			? { toolCallId: tc.toolCallId, serverId: result.serverId, kind: 'deleted' }
+			: undefined;
+	}
+
+	// Every other write returns the server summary.
+	const server = toMcpServerLookupEntry(result.server);
+	if (!server) return undefined;
+	return {
+		toolCallId: tc.toolCallId,
+		serverId: server.id,
+		kind: action === 'create' ? 'created' : 'mutated',
+		name: server.name,
+		...(server.projectId ? { projectId: server.projectId } : {}),
+	};
+}
+
+/**
+ * Every finished `custom-mcp-servers` write across the turns, oldest first.
+ * Approvals can finish in any order, so callers compare seen toolCallIds rather than only the last.
+ */
+export function getMcpServerMutationEvents(
+	turns: readonly ArtifactTurn[],
+): McpServerMutationEvent[] {
+	const events: McpServerMutationEvent[] = [];
+	for (const tc of artifactToolCalls(turns)) {
+		const event = getMcpServerMutationEventFromToolCall(tc);
+		if (event) events.push(event);
+	}
+	return events;
+}
+
 function getAgentArtifactResult(tc: ArtifactToolCall): AgentArtifactResult | undefined {
 	if (tc.isLoading || !isRecord(tc.result)) return undefined;
 	const result = tc.result;

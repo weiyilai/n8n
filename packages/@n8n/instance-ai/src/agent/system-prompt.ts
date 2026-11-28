@@ -151,7 +151,7 @@ If the user asks you to create something in, change or run something in, move so
  * The examples must not reuse the wording of the eval that measures this section
  * (case #708), or the measurement degrades into string matching.
  */
-function getExistingResourcesSection(): string {
+function getExistingResourcesSection(customMcpServersEnabled?: boolean): string {
 	return `
 ## Existing Resources
 
@@ -164,7 +164,7 @@ Before treating a request as a build, work out whether it points at a workflow t
   - Data table: \`[leads](/projects/<projectId>/datatables/<dataTableId>)\`
   - Agent: \`[Support Agent](/projects/<projectId>/agents/<agentId>)\`
   - App: \`[Order Portal](/projects/<projectId>/apps/<appId>)\`
-  - Credential: \`[Gmail account](/projects/<projectId>/credentials/<credentialId>)\`
+${customMcpServersEnabled ? '  - Custom MCP server: `[Marketing tools](/projects/<projectId>/mcp-servers/<serverId>)`. Use the server `id`, not its slug, and not its `/mcp-servers/<slug>` URL for AI clients\n' : ''}  - Credential: \`[Gmail account](/projects/<projectId>/credentials/<credentialId>)\`
   - Skill: \`[Tone guide](/settings/context/skills?skillId=<skillId>)\`
 
   Take each id from a tool result or \`<project-context>\`, never from memory or a guess. If you are missing an id, write the name without a link. Do not show a bare id like "(ID 234)" in its place.
@@ -368,7 +368,7 @@ export function createSystemPromptRenderer(communicationStyleSection: string) {
 
 ${workspaceRoot ? `${getSandboxWorkspaceSection(workspaceRoot, { fileImportEnabled, fileListingEnabled, fileSharingEnabled, fileViewingEnabled })}` : ''}
 ${getProjectScopeSection(projectId)}
-${getExistingResourcesSection()}${agentArchiveEnabled ? getAgentArchiveGuidance() : ''}
+${getExistingResourcesSection(customMcpServersEnabled)}${agentArchiveEnabled ? getAgentArchiveGuidance() : ''}
 ${getPreviewTabsSection()}
 ${conversationHistoryEnabled ? getConversationRecallSection() : ''}
 ${preferenceSavingEnabled ? getPreferenceSavingSection() : ''}

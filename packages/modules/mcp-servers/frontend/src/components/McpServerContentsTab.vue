@@ -48,8 +48,6 @@ const props = defineProps<{
 	serverId: string;
 	/** The instance has the n8n Assistant, so an empty server offers to build with it. */
 	assistantAvailable?: boolean;
-	/** The Assistant panel is open beside the page. */
-	assistantOpen?: boolean;
 	/** A new value loads the server again, after the Assistant changed it. */
 	refreshKey?: number;
 }>();
@@ -536,7 +534,6 @@ onMounted(load);
 						size="small"
 						icon="n8n-assistant"
 						:label="i18n.baseText('mcpServers.assistant.build.button')"
-						:disabled="assistantOpen"
 						data-test-id="mcp-server-build-with-assistant-button"
 						data-attr="mcp-server-build-with-assistant"
 						@click="emit('build-with-assistant')"

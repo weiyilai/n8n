@@ -211,6 +211,7 @@ vi.mock('@/features/agents/components/AgentChatPanel.vue', () => ({
 							slots['message-actions']?.({ message, executionId: message.executionId }),
 						]),
 					),
+					slots['empty-state']?.(),
 					slots['inline-offers']?.(),
 					slots['above-input']?.(),
 					slots['composer-attachments']?.(),
@@ -309,6 +310,43 @@ vi.mock('../../components/InstanceAiAppPreview.vue', () => ({
 				appPreviewProps.current = { ...attrs };
 				return h('div', { 'data-test-id': 'app-preview-stub' });
 			};
+		},
+	}),
+}));
+
+const { mcpServerPreviewProps } = vi.hoisted(() => ({
+	mcpServerPreviewProps: { current: undefined as Record<string, unknown> | undefined },
+}));
+vi.mock('../../components/InstanceAiMcpServerPreview.vue', () => ({
+	default: defineComponent({
+		inheritAttrs: false,
+		setup(_props, { attrs }) {
+			return () => {
+				mcpServerPreviewProps.current = { ...attrs };
+				return h('div', { 'data-test-id': 'mcp-server-preview-stub' });
+			};
+		},
+	}),
+}));
+vi.mock('../../components/InstanceAiMcpServerEmptyState.vue', () => ({
+	default: defineComponent({
+		props: { projectId: String, serverId: String },
+		emits: ['select'],
+		setup(props, { emit }) {
+			return () =>
+				h(
+					'button',
+					{
+						'data-test-id': 'mcp-server-empty-state-stub',
+						'data-server-id': props.serverId,
+						onClick: () =>
+							emit('select', {
+								text: 'Add the workflows that fit this server.',
+								prefillType: 'mcp_server_suggestion',
+							}),
+					},
+					'Suggestion',
+				);
 		},
 	}),
 }));
@@ -1358,6 +1396,74 @@ describe('AssistantAgentThreadView', () => {
 			expect(clientContext()).toMatchObject({
 				subject: { type: 'app', id: APP_ID, projectId: 'project-1', pending: true },
 			});
+		});
+
+		it('opens a custom MCP server tab for a server launch subject and sends the subject until session creation', async () => {
+			mcpServerPreviewProps.current = undefined;
+			const SERVER_ID = '0190a5d2-6f4b-7c3e-8a1d-2b3c4d5e6f71';
+			stashAssistantAgentLaunch('thread-new', {
+				projectId: 'project-1',
+				source: 'mcp_server_page',
+				origin: 'internal',
+				subject: {
+					type: 'mcpServer',
+					id: SERVER_ID,
+					projectId: 'project-1',
+					name: 'Marketing tools',
+				},
+			});
+
+			const { getByTestId } = renderView({
+				props: { threadId: 'thread-new', projectId: 'project-1' },
+			});
+			await flushPromises();
+
+			expect(getByTestId('assistant-agent-preview-panel')).toBeVisible();
+			expect(mcpServerPreviewProps.current).toMatchObject({
+				'project-id': 'project-1',
+				'server-id': SERVER_ID,
+			});
+			expect(clientContext()).toMatchObject({
+				subject: {
+					type: 'mcpServer',
+					id: SERVER_ID,
+					projectId: 'project-1',
+					name: 'Marketing tools',
+				},
+			});
+		});
+
+		it('puts the MCP server suggestion into the composer and sends its prefill type', async () => {
+			stashAssistantAgentLaunch('thread-new', {
+				projectId: 'project-1',
+				source: 'mcp_server_page',
+				origin: 'internal',
+				subject: {
+					type: 'mcpServer',
+					id: '0190a5d2-6f4b-7c3e-8a1d-2b3c4d5e6f71',
+					projectId: 'project-1',
+					name: 'Marketing tools',
+				},
+			});
+
+			const { getByTestId } = renderView({
+				props: { threadId: 'thread-new', projectId: 'project-1' },
+			});
+			await flushPromises();
+			await userEvent.click(getByTestId('mcp-server-empty-state-stub'));
+
+			expect(setDraft).toHaveBeenCalledWith('Add the workflows that fit this server.');
+			expect(focusInput).toHaveBeenCalled();
+			const onMessageSending = panelProps.current.onMessageSending as (payload: unknown) => void;
+			onMessageSending({
+				text: 'Add the workflows that fit this server.',
+				files: [],
+				isFirstMessage: true,
+			});
+			expect(telemetryTrack).toHaveBeenCalledWith(
+				TELEMETRY_EVENT.INSTANCE_AI.USER_SENT_BUILDER_MESSAGE,
+				expect.objectContaining({ prefill_type: 'mcp_server_suggestion', prompt_modified: false }),
+			);
 		});
 
 		it('opens the app from the URL among the apps of the thread metadata', async () => {

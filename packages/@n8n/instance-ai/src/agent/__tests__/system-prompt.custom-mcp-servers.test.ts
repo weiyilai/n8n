@@ -12,10 +12,19 @@ describe('getSystemPrompt — custom MCP servers', () => {
 		);
 	});
 
+	it('names the link form of a custom MCP server, by id', () => {
+		const prompt = getSystemPrompt({ customMcpServersEnabled: true });
+
+		expect(prompt).toContain(
+			'- Custom MCP server: `[Marketing tools](/projects/<projectId>/mcp-servers/<serverId>)`',
+		);
+	});
+
 	it.each([undefined, false])('leaves the rule out when the tool is not wired: %s', (enabled) => {
 		const prompt = getSystemPrompt({ customMcpServersEnabled: enabled });
 
 		expect(prompt).not.toContain('custom-mcp-servers');
+		expect(prompt).not.toContain('Custom MCP server:');
 		expect(prompt).toContain('n8n has two MCP servers');
 	});
 });
