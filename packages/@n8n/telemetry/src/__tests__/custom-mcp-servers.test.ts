@@ -53,6 +53,12 @@ describe('custom MCP server events', () => {
 		},
 	);
 
+	it('records the draft of one input description', () => {
+		const shape = events.USER_DRAFTED_TOOL_OF_CUSTOM_MCP_SERVER.properties.shape;
+		expect(shape.field.safeParse('inputDescription').success).toBe(true);
+		expect(shape.field.safeParse('both').success).toBe(true);
+	});
+
 	it.each(clientEvents.map((event) => [event.name, event]))(
 		'%s has no source, because an AI client starts it',
 		(_name, event) => {

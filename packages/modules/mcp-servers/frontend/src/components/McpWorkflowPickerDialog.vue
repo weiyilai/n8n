@@ -185,6 +185,8 @@ function onConfirm() {
 
 <style lang="scss" module>
 .body {
+	// With a footer, the dialog sets the body's bottom padding to the focus width. This token adds space.
+	--n8n-dialog-body--padding-block-end: var(--spacing--md);
 	display: flex;
 	flex-direction: column;
 	gap: var(--spacing--xs);

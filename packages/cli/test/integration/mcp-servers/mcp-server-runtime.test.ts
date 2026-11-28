@@ -418,6 +418,104 @@ describe('Custom MCP server runtime with a real MCP client', () => {
 	});
 });
 
+describe('Custom MCP server runtime with input settings', () => {
+	/** A server whose tool has a description for `owner_email`, and needs it in each call. */
+	async function createServerWithInputSettings() {
+		const slug = `owner-tools-${uuidv7().slice(-8)}`;
+		const server = await createServer(slug, '');
+		const workflow = await createActiveWorkflow(
+			{ name: 'Pipeline by owner', nodes: [TRIGGER], connections: {} },
+			project,
+		);
+		await createMcpServerTool({
+			id: uuidv7(),
+			serverId: server.id,
+			kind: 'workflow',
+			targetId: workflow.id,
+			toolName: 'get_owner_pipeline',
+			description: 'The pipeline of one deal owner.',
+			draftSource: 'edited',
+			toolData: {
+				inputs: { owner_email: { description: 'The email of the deal owner.', required: true } },
+			},
+			position: 0,
+		});
+		return slug;
+	}
+
+	it('lists the description of each input and the required inputs', async () => {
+		const slug = await createServerWithInputSettings();
+		const client = await connect(await tokenFor(member, resourceUrl(slug)), slug);
+
+		const { tools } = await client.listTools();
+
+		expect(tools).toEqual([
+			expect.objectContaining({
+				name: 'get_owner_pipeline',
+				inputSchema: expect.objectContaining({
+					type: 'object',
+					properties: {
+						owner_email: { description: 'The email of the deal owner.', type: 'string' },
+					},
+					required: ['owner_email'],
+				}),
+			}),
+		]);
+		await client.close();
+	});
+
+	it.each([
+		['without the input', {}],
+		['with a null value', { owner_email: null }],
+	])(
+		'returns an error result for a call %s, and does not run the workflow',
+		async (_case, args) => {
+			const run = vi.spyOn(Container.get(WorkflowToolPort), 'run');
+			const emit = vi.spyOn(Container.get(EventService), 'emit');
+			const slug = await createServerWithInputSettings();
+			const client = await connect(await tokenFor(member, resourceUrl(slug)), slug);
+
+			const result = await client.callTool({ name: 'get_owner_pipeline', arguments: args });
+
+			expect(result).toEqual({
+				isError: true,
+				content: [
+					{
+						type: 'text',
+						text: 'The required input "owner_email" is missing. Send a value for it.',
+					},
+				],
+			});
+			expect(run).not.toHaveBeenCalled();
+			expect(emit).toHaveBeenCalledWith(
+				'mcp-server-tool-called',
+				expect.objectContaining({ userId: member.id, status: 'error' }),
+			);
+			await client.close();
+		},
+	);
+
+	it('runs the workflow when the call sends every required input', async () => {
+		const run = vi.spyOn(Container.get(WorkflowToolPort), 'run').mockResolvedValue({
+			status: 'success',
+			executionId: '1',
+			finished: Promise.resolve(),
+			output: [{ deals: 2 }],
+		});
+		const slug = await createServerWithInputSettings();
+		const client = await connect(await tokenFor(member, resourceUrl(slug)), slug);
+
+		const result = await client.callTool({
+			name: 'get_owner_pipeline',
+			arguments: { owner_email: 'maya@example.com' },
+		});
+
+		expect(result).toEqual({ content: [{ type: 'text', text: '[{"deals":2}]' }] });
+		expect(run).toHaveBeenCalledTimes(1);
+		await client.close();
+	});
+});
+
 describe('Custom MCP server runtime access', () => {
 	it('refuses a person outside the project with 403 and insufficient_scope', async () => {
 		const token = await tokenFor(outsider, resourceUrl(serverSlug));

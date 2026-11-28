@@ -333,6 +333,8 @@ async function onCreate() {
 
 <style lang="scss" module>
 .form {
+	// With a footer, the dialog sets the body's bottom padding to the focus width. This token adds space.
+	--n8n-dialog-body--padding-block-end: var(--spacing--md);
 	display: flex;
 	flex-direction: column;
 }

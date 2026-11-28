@@ -27,7 +27,11 @@ export class McpServerTool extends WithTimestamps {
 	@Column({ type: 'varchar', length: 16, default: 'defaults' })
 	draftSource: McpServerToolDraftSource;
 
-	/** Fixed input values of a workflow tool, or the node definition of a node tool. */
+	/**
+	 * Settings of the tool. For a workflow tool: `{ inputs: { [inputName]: { description, required } } }`,
+	 * the settings of its trigger inputs. `null` when the builder set nothing. Code reads it with
+	 * `readInputSettings`, because the column can hold any JSON.
+	 */
 	@JsonColumn({ nullable: true })
 	toolData: Record<string, unknown> | null;
 

@@ -1,4 +1,4 @@
-import type { McpServerToolDraftSource } from '@n8n/api-types';
+import type { McpServerToolDraftSource, McpServerToolInputSettings } from '@n8n/api-types';
 import {
 	BaseRepository,
 	isUniqueConstraintError,
@@ -34,7 +34,11 @@ export type McpServerToolFixtureRow = Partial<
 	Pick<McpServerTool, 'serverId' | 'toolName'>;
 
 export type McpServerToolChanges = Partial<
-	Pick<McpServerTool, 'toolName' | 'description'> & { draftSource: McpServerToolDraftSource }
+	Pick<McpServerTool, 'toolName' | 'description'> & {
+		draftSource: McpServerToolDraftSource;
+		/** The settings of the trigger inputs of a workflow tool, by input name. */
+		toolData: { inputs: Record<string, McpServerToolInputSettings> };
+	}
 >;
 
 /** The unique index on the server and the tool name refused the write. */

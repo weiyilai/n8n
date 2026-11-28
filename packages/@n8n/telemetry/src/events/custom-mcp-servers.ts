@@ -58,7 +58,9 @@ export const CUSTOM_MCP_SERVERS_TELEMETRY = defineTelemetryEvents({
 			user_id: userId,
 			field: z
 				.enum([...mcpServerToolDraftFieldSchema.options, 'both'])
-				.describe('both for the draft after an add. One field for a "Generate" click'),
+				.describe(
+					'both for the draft after an add. One field for a "Generate" click. inputDescription: the "Generate" click of one input',
+				),
 			status: z
 				.enum(['drafted', 'invalid_answer', 'model_failed', 'no_credits', 'not_available'])
 				.describe(

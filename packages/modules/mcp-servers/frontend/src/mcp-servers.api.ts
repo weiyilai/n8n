@@ -9,6 +9,7 @@ import type {
 	McpServerSharePublic,
 	McpServerSlugAvailability,
 	McpServerToolCandidate,
+	McpServerToolDetailResponse,
 	McpServerToolDraftField,
 	McpServerToolDraftResponse,
 	McpServerToolResponse,
@@ -103,6 +104,19 @@ export async function addWorkflowTools(
 	});
 }
 
+export async function getToolDetail(
+	context: IRestApiContext,
+	projectId: string,
+	serverId: string,
+	toolId: string,
+): Promise<McpServerToolDetailResponse> {
+	return await makeRestApiRequest(
+		context,
+		'GET',
+		`${serverPath(projectId, serverId)}/tools/${toolId}`,
+	);
+}
+
 export async function updateTool(
 	context: IRestApiContext,
 	projectId: string,
@@ -127,19 +141,27 @@ export async function removeTool(
 	await makeRestApiRequest(context, 'DELETE', `${serverPath(projectId, serverId)}/tools/${toolId}`);
 }
 
-/** One model call. Without `field`, the draft writes both fields, as after an add. */
+/**
+ * One model call. Without `field`, the draft writes the name, the description, and the input
+ * descriptions, as after an add. `field: 'inputDescription'` needs `options.inputName`.
+ */
 export async function draftTool(
 	context: IRestApiContext,
 	projectId: string,
 	serverId: string,
 	toolId: string,
 	field?: McpServerToolDraftField,
+	options?: { persist?: boolean; inputName?: string },
 ): Promise<McpServerToolDraftResponse> {
 	return await makeRestApiRequest(
 		context,
 		'POST',
 		`${serverPath(projectId, serverId)}/tools/${toolId}/draft`,
-		field ? { field } : {},
+		{
+			...(field ? { field } : {}),
+			...(options?.inputName !== undefined ? { inputName: options.inputName } : {}),
+			...(options?.persist === false ? { persist: false } : {}),
+		},
 	);
 }
 

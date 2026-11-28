@@ -87,7 +87,71 @@ describe('MCP server DTOs', () => {
 	it('drafts both fields, or one field for a "Generate" button', () => {
 		expect(DraftMcpServerToolDto.parse({})).toEqual({});
 		expect(DraftMcpServerToolDto.parse({ field: 'description' })).toEqual({ field: 'description' });
+		expect(DraftMcpServerToolDto.parse({ field: 'toolName', persist: false })).toEqual({
+			field: 'toolName',
+			persist: false,
+		});
 		expect(DraftMcpServerToolDto.safeParse({ field: 'kind' }).success).toBe(false);
+		expect(DraftMcpServerToolDto.safeParse({ persist: 'no' }).success).toBe(false);
+	});
+
+	it('drafts the description of one input only with its name', () => {
+		expect(
+			DraftMcpServerToolDto.parse({
+				field: 'inputDescription',
+				inputName: 'campaign_id',
+				persist: false,
+			}),
+		).toEqual({ field: 'inputDescription', inputName: 'campaign_id', persist: false });
+		expect(DraftMcpServerToolDto.safeParse({ field: 'inputDescription' }).success).toBe(false);
+		expect(
+			DraftMcpServerToolDto.safeParse({ field: 'inputDescription', inputName: '' }).success,
+		).toBe(false);
+		expect(DraftMcpServerToolDto.safeParse({ inputName: 'campaign_id' }).success).toBe(false);
+		expect(
+			DraftMcpServerToolDto.safeParse({ field: 'description', inputName: 'campaign_id' }).success,
+		).toBe(false);
+		expect(DraftMcpServerToolDto.safeParse({ extra: true }).success).toBe(false);
+	});
+
+	it('sets the description and the "Required" setting of trigger inputs', () => {
+		expect(
+			UpdateMcpServerToolDto.parse({
+				inputs: { campaign_id: { description: '  The ID of the campaign. ', required: true } },
+			}),
+		).toEqual({
+			inputs: { campaign_id: { description: 'The ID of the campaign.', required: true } },
+		});
+		expect(
+			UpdateMcpServerToolDto.safeParse({ inputs: { campaign_id: { description: 'x' } } }).success,
+		).toBe(false);
+		expect(
+			UpdateMcpServerToolDto.safeParse({
+				inputs: { campaign_id: { description: 'a'.repeat(1001), required: false } },
+			}).success,
+		).toBe(false);
+		expect(
+			UpdateMcpServerToolDto.safeParse({
+				inputs: { campaign_id: { description: 'a'.repeat(1000), required: false } },
+			}).success,
+		).toBe(true);
+		expect(
+			UpdateMcpServerToolDto.safeParse({ inputs: { '': { description: '', required: false } } })
+				.success,
+		).toBe(false);
+	});
+
+	it('takes at most 200 input settings in one update', () => {
+		const inputs = (count: number) =>
+			Object.fromEntries(
+				Array.from({ length: count }, (_, i) => [
+					`input_${i}`,
+					{ description: '', required: false },
+				]),
+			);
+
+		expect(UpdateMcpServerToolDto.safeParse({ inputs: inputs(200) }).success).toBe(true);
+		expect(UpdateMcpServerToolDto.safeParse({ inputs: inputs(201) }).success).toBe(false);
 	});
 
 	it('blocks a person by user id', () => {

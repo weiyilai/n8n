@@ -1,7 +1,7 @@
 import type { Logger } from '@n8n/backend-common';
 import type { EventService } from '@n8n/backend-services';
 import type { User } from '@n8n/db';
-import { ConflictError } from '@n8n/errors';
+import { BadRequestError, ConflictError } from '@n8n/errors';
 import { mock } from 'vitest-mock-extended';
 
 import type { McpServerTool } from '../database/entities/mcp-server-tool.entity';
@@ -203,7 +203,8 @@ describe('McpServerToolsService.updateTool', () => {
 			id: TOOL_ID,
 			serverId: SERVER_ID,
 			kind: 'workflow',
-			targetId: null,
+			targetId: 'workflow-1',
+			toolData: { inputs: { days: { description: 'How many days.', required: false } } },
 			createdAt: new Date(),
 			updatedAt: new Date(),
 		});
@@ -211,6 +212,11 @@ describe('McpServerToolsService.updateTool', () => {
 		tools.findInServer.mockResolvedValue(tool);
 		tools.updateInServer.mockResolvedValue(tool);
 		const { workflows, textDrafts } = mockMcpServerPorts();
+		workflows.check.mockResolvedValue({ callable: true });
+		workflows.listInputs.mockResolvedValue([
+			{ name: 'campaign_id', type: 'string' },
+			{ name: 'days', type: 'number' },
+		]);
 		const service = new McpServerToolsService(
 			servers,
 			tools,
@@ -219,7 +225,7 @@ describe('McpServerToolsService.updateTool', () => {
 			mock<EventService>(),
 			mock<Logger>(),
 		);
-		return { service, tools };
+		return { service, tools, workflows };
 	}
 
 	it('marks an edit of the builder as edited', async () => {
@@ -243,13 +249,61 @@ describe('McpServerToolsService.updateTool', () => {
 			draftSource: 'ai',
 		});
 	});
+
+	it('stores the settings of trigger inputs, keeps the other inputs, and ignores unknown names', async () => {
+		const { service, tools, workflows } = setupTool();
+
+		await service.updateTool(PROJECT_ID, SERVER_ID, TOOL_ID, {
+			inputs: {
+				campaign_id: { description: 'The ID of the campaign.', required: true },
+				unknown_input: { description: 'Not in the trigger.', required: true },
+			},
+		});
+
+		expect(workflows.listInputs).toHaveBeenCalledWith(PROJECT_ID, 'workflow-1');
+		// A change of only the input settings is not a change of the tool text.
+		expect(tools.updateInServer).toHaveBeenCalledWith(SERVER_ID, TOOL_ID, {
+			toolData: {
+				inputs: {
+					days: { description: 'How many days.', required: false },
+					campaign_id: { description: 'The ID of the campaign.', required: true },
+				},
+			},
+		});
+	});
+
+	it('saves nothing when every input name is unknown', async () => {
+		const { service, tools } = setupTool();
+
+		await service.updateTool(PROJECT_ID, SERVER_ID, TOOL_ID, {
+			inputs: { unknown_input: { description: 'Not in the trigger.', required: true } },
+		});
+
+		expect(tools.updateInServer).not.toHaveBeenCalled();
+	});
+
+	it('saves the text and the input settings in one update', async () => {
+		const { service, tools } = setupTool();
+
+		await service.updateTool(PROJECT_ID, SERVER_ID, TOOL_ID, {
+			description: 'New',
+			inputs: { days: { description: 'The number of days.', required: true } },
+		});
+
+		expect(tools.updateInServer).toHaveBeenCalledTimes(1);
+		expect(tools.updateInServer).toHaveBeenCalledWith(SERVER_ID, TOOL_ID, {
+			description: 'New',
+			draftSource: 'edited',
+			toolData: { inputs: { days: { description: 'The number of days.', required: true } } },
+		});
+	});
 });
 
 describe('McpServerToolsService.draftTool saves a drafted name', () => {
 	const TOOL_ID = '7b0c2a52-3c1f-4f53-9a51-0c0d8c3a0a03';
 	const ACTOR = { userId: 'user-1', source: 'ui' } as const;
 
-	function setupDraft() {
+	function setupDraft(toolData: McpServerTool['toolData'] = null) {
 		const servers = mock<McpServerRepository>();
 		const tools = mock<McpServerToolRepository>();
 		const { workflows, textDrafts } = mockMcpServerPorts();
@@ -260,6 +314,7 @@ describe('McpServerToolsService.draftTool saves a drafted name', () => {
 			targetId: 'workflow-1',
 			toolName: 'old_name',
 			description: 'Old text.',
+			toolData,
 			createdAt: new Date(),
 			updatedAt: new Date(),
 		});
@@ -288,8 +343,143 @@ describe('McpServerToolsService.draftTool saves a drafted name', () => {
 		);
 		const draft = async () =>
 			await service.draftTool(mock<User>(), PROJECT_ID, SERVER_ID, TOOL_ID, ACTOR);
-		return { draft, tools, tool };
+		return { draft, tools, tool, service, textDrafts, workflows };
 	}
+
+	const INPUT_SCHEMA = {
+		type: 'object' as const,
+		properties: {
+			campaign_id: { type: ['string', 'null'] },
+			days: { type: ['number', 'null'] },
+		},
+		additionalProperties: false,
+	};
+
+	it('saves the drafted input descriptions, without overwriting a description of the builder', async () => {
+		const { draft, tools, tool, textDrafts, workflows } = setupDraft({
+			inputs: { days: { description: 'Days of the builder.', required: true } },
+		});
+		tools.updateInServer.mockResolvedValue(tool);
+		workflows.describe.mockResolvedValue({
+			callable: true,
+			name: 'Campaign',
+			description: null,
+			inputSchema: INPUT_SCHEMA,
+			nodeNames: [],
+		});
+		textDrafts.draft.mockResolvedValue({
+			status: 'drafted',
+			text: JSON.stringify({
+				toolName: 'get_campaign',
+				description: 'Returns one campaign.',
+				inputDescriptions: { campaign_id: 'The ID of the campaign.', days: 'The days.' },
+			}),
+		});
+
+		const result = await draft();
+
+		expect(result).toMatchObject({
+			status: 'drafted',
+			inputDescriptions: { campaign_id: 'The ID of the campaign.', days: 'The days.' },
+		});
+		expect(tools.updateInServer).toHaveBeenCalledWith(SERVER_ID, TOOL_ID, {
+			toolName: 'get_campaign',
+			description: 'Returns one campaign.',
+			draftSource: 'ai',
+			toolData: {
+				inputs: {
+					days: { description: 'Days of the builder.', required: true },
+					campaign_id: { description: 'The ID of the campaign.', required: false },
+				},
+			},
+		});
+	});
+
+	it('saves the name and the description when the input descriptions are broken', async () => {
+		const { draft, tools, tool, textDrafts, workflows } = setupDraft();
+		tools.updateInServer.mockResolvedValue(tool);
+		workflows.describe.mockResolvedValue({
+			callable: true,
+			name: 'Campaign',
+			description: null,
+			inputSchema: INPUT_SCHEMA,
+			nodeNames: [],
+		});
+		textDrafts.draft.mockResolvedValue({
+			status: 'drafted',
+			text: JSON.stringify({
+				toolName: 'get_campaign',
+				description: 'Returns one campaign.',
+				inputDescriptions: 'broken',
+			}),
+		});
+
+		await expect(draft()).resolves.toMatchObject({ status: 'drafted', inputDescriptions: {} });
+		expect(tools.updateInServer).toHaveBeenCalledWith(SERVER_ID, TOOL_ID, {
+			toolName: 'get_campaign',
+			description: 'Returns one campaign.',
+			draftSource: 'ai',
+		});
+	});
+
+	it('drafts the description of one input without saving it when persist is false', async () => {
+		const { service, tools, textDrafts, workflows } = setupDraft({
+			inputs: { days: { description: 'Old days.', required: true } },
+		});
+		workflows.describe.mockResolvedValue({
+			callable: true,
+			name: 'Campaign',
+			description: null,
+			inputSchema: INPUT_SCHEMA,
+			nodeNames: [],
+		});
+		textDrafts.draft.mockResolvedValue({
+			status: 'drafted',
+			text: JSON.stringify({ inputDescription: 'The number of days, from 1 to 90.' }),
+		});
+
+		const result = await service.draftTool(
+			mock<User>(),
+			PROJECT_ID,
+			SERVER_ID,
+			TOOL_ID,
+			ACTOR,
+			'inputDescription',
+			{ persist: false, inputName: 'days' },
+		);
+
+		expect(textDrafts.draft.mock.calls[0][1]).toContain(
+			'The current description of the input "days": Old days.',
+		);
+		expect(result).toMatchObject({
+			status: 'drafted',
+			tool: { toolName: 'old_name', description: 'Old text.' },
+			inputDescriptions: { days: 'The number of days, from 1 to 90.' },
+		});
+		expect(tools.updateInServer).not.toHaveBeenCalled();
+	});
+
+	it.each([['unknown_input'], [undefined]])(
+		'refuses to draft the description of the input %s that the trigger does not declare',
+		async (inputName) => {
+			const { service, textDrafts, workflows } = setupDraft();
+			workflows.describe.mockResolvedValue({
+				callable: true,
+				name: 'Campaign',
+				description: null,
+				inputSchema: INPUT_SCHEMA,
+				nodeNames: [],
+			});
+
+			await expect(
+				service.draftTool(mock<User>(), PROJECT_ID, SERVER_ID, TOOL_ID, ACTOR, 'inputDescription', {
+					persist: false,
+					inputName,
+				}),
+			).rejects.toBeInstanceOf(BadRequestError);
+			expect(textDrafts.draft).not.toHaveBeenCalled();
+		},
+	);
 
 	it('tries again when another draft took the name first', async () => {
 		const { draft, tools, tool } = setupDraft();
@@ -338,5 +528,176 @@ describe('McpServerToolsService.draftTool saves a drafted name', () => {
 
 		await expect(draft()).rejects.toBeInstanceOf(McpServerToolNotFoundError);
 		expect(tools.updateInServer).toHaveBeenCalledTimes(1);
+	});
+
+	it('returns a collision-free draft without saving when persist is false', async () => {
+		const servers = mock<McpServerRepository>();
+		const tools = mock<McpServerToolRepository>();
+		const { workflows, textDrafts } = mockMcpServerPorts();
+		const tool = mock<McpServerTool>({
+			id: TOOL_ID,
+			serverId: SERVER_ID,
+			kind: 'workflow',
+			targetId: 'workflow-1',
+			toolName: 'old_name',
+			description: 'Old text.',
+			createdAt: new Date(),
+			updatedAt: new Date(),
+		});
+		const competing = mock<McpServerTool>({ id: 'other-tool', toolName: 'get_campaign' });
+		servers.findInProject.mockResolvedValue(mock<McpServer>({ id: SERVER_ID }));
+		tools.findInServer.mockResolvedValue(tool);
+		tools.listByServer.mockResolvedValue([tool, competing]);
+		textDrafts.isAvailable.mockResolvedValue(true);
+		textDrafts.draft.mockResolvedValue({
+			status: 'drafted',
+			text: JSON.stringify({ toolName: 'get_campaign' }),
+		});
+		workflows.describe.mockResolvedValue({
+			callable: true,
+			name: 'Campaign',
+			description: null,
+			inputSchema: { type: 'object', additionalProperties: true },
+			nodeNames: [],
+		});
+		const service = new McpServerToolsService(
+			servers,
+			tools,
+			workflows,
+			textDrafts,
+			mock<EventService>(),
+			mock<Logger>(),
+		);
+
+		const result = await service.draftTool(
+			mock<User>(),
+			PROJECT_ID,
+			SERVER_ID,
+			TOOL_ID,
+			ACTOR,
+			'toolName',
+			{ persist: false },
+		);
+
+		expect(result).toMatchObject({
+			status: 'drafted',
+			tool: { toolName: 'get_campaign_2', description: 'Old text.' },
+		});
+		expect(tools.updateInServer).not.toHaveBeenCalled();
+	});
+});
+
+describe('McpServerToolsService.getToolDetail', () => {
+	const TOOL_ID = '7b0c2a52-3c1f-4f53-9a51-0c0d8c3a0a05';
+
+	it('returns source name, inputs, outputs, and broken reason for a workflow tool', async () => {
+		const servers = mock<McpServerRepository>();
+		const tools = mock<McpServerToolRepository>();
+		const { workflows, textDrafts } = mockMcpServerPorts();
+		const user = mock<User>();
+		const now = new Date();
+		servers.findInProject.mockResolvedValue(mock<McpServer>({ id: SERVER_ID }));
+		tools.findInServer.mockResolvedValue(
+			mock<McpServerTool>({
+				id: TOOL_ID,
+				serverId: SERVER_ID,
+				kind: 'workflow',
+				targetId: 'workflow-1',
+				toolName: 'get_campaign_numbers',
+				description: 'Campaign numbers.',
+				draftSource: 'edited',
+				toolData: {
+					inputs: {
+						campaign_id: { description: 'The ID of the campaign.', required: true },
+						removed_input: { description: 'Gone.', required: true },
+					},
+				},
+				position: 0,
+				createdAt: now,
+				updatedAt: now,
+			}),
+		);
+		workflows.check.mockResolvedValue({ callable: true });
+		workflows.inspect.mockResolvedValue({
+			sourceName: 'Get campaign numbers',
+			inputs: [{ name: 'campaign_id', type: 'string' }],
+			outputs: [
+				{ name: 'clicks', type: 'number' },
+				{ name: 'active', type: 'boolean' },
+			],
+		});
+		const service = new McpServerToolsService(
+			servers,
+			tools,
+			workflows,
+			textDrafts,
+			mock<EventService>(),
+			mock<Logger>(),
+		);
+
+		const detail = await service.getToolDetail(user, PROJECT_ID, SERVER_ID, TOOL_ID);
+
+		expect(workflows.inspect).toHaveBeenCalledWith(PROJECT_ID, 'workflow-1', user);
+		expect(detail).toMatchObject({
+			id: TOOL_ID,
+			toolName: 'get_campaign_numbers',
+			brokenReason: null,
+			sourceName: 'Get campaign numbers',
+			outputs: [
+				{ name: 'clicks', type: 'number' },
+				{ name: 'active', type: 'boolean' },
+			],
+		});
+		// The settings of an input that the trigger lost are not in the answer.
+		expect(detail.inputs).toEqual([
+			{
+				name: 'campaign_id',
+				type: 'string',
+				description: 'The ID of the campaign.',
+				required: true,
+			},
+		]);
+	});
+
+	it('returns empty inputs and null outputs for a non-workflow tool without calling workflows.inspect', async () => {
+		const servers = mock<McpServerRepository>();
+		const tools = mock<McpServerToolRepository>();
+		const { workflows, textDrafts } = mockMcpServerPorts();
+		const now = new Date();
+		servers.findInProject.mockResolvedValue(mock<McpServer>({ id: SERVER_ID }));
+		tools.findInServer.mockResolvedValue(
+			mock<McpServerTool>({
+				id: TOOL_ID,
+				serverId: SERVER_ID,
+				kind: 'node',
+				targetId: null,
+				toolName: 'slack_send',
+				description: 'Send a Slack message.',
+				draftSource: 'defaults',
+				position: 0,
+				createdAt: now,
+				updatedAt: now,
+			}),
+		);
+		const service = new McpServerToolsService(
+			servers,
+			tools,
+			workflows,
+			textDrafts,
+			mock<EventService>(),
+			mock<Logger>(),
+		);
+
+		const detail = await service.getToolDetail(mock<User>(), PROJECT_ID, SERVER_ID, TOOL_ID);
+
+		expect(workflows.inspect).not.toHaveBeenCalled();
+		expect(detail).toMatchObject({
+			id: TOOL_ID,
+			kind: 'node',
+			brokenReason: null,
+			sourceName: null,
+			inputs: [],
+			outputs: null,
+		});
 	});
 });

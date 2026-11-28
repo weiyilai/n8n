@@ -63,7 +63,7 @@ function onRename() {
 		@update:open="(value: boolean) => !saving && (open = value)"
 		@open-auto-focus="onOpenAutoFocus"
 	>
-		<N8nDialogBody>
+		<N8nDialogBody :class="$style.body">
 			<N8nInputLabel
 				:label="i18n.baseText('mcpServers.rename.name')"
 				:bold="false"
@@ -103,6 +103,11 @@ function onRename() {
 </template>
 
 <style lang="scss" module>
+.body {
+	// With a footer, the dialog sets the body's bottom padding to the focus width. This token adds space.
+	--n8n-dialog-body--padding-block-end: var(--spacing--md);
+}
+
 .helper {
 	margin-top: var(--spacing--2xs);
 	word-break: break-all;

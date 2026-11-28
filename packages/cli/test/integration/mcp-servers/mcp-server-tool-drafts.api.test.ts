@@ -223,6 +223,31 @@ describe('POST /projects/:projectId/mcp-servers/:serverId/tools/:toolId/draft', 
 		]);
 	});
 
+	it('returns a drafted field without saving when persist is false', async () => {
+		const { serverId, tool, draftUrl } = await setup();
+		answer({ toolName: 'get_campaign_kpis' });
+
+		const response = await testServer
+			.authAgentFor(editor)
+			.post(draftUrl)
+			.send({ field: 'toolName', persist: false })
+			.expect(200);
+
+		expect(response.body.data).toMatchObject({
+			status: 'drafted',
+			tool: {
+				toolName: 'get_campaign_kpis',
+				description: tool.description,
+			},
+		});
+		const server = await testServer.authAgentFor(editor).get(base(serverId)).expect(200);
+		expect(server.body.data.tools[0]).toMatchObject({
+			toolName: tool.toolName,
+			description: tool.description,
+			draftSource: 'defaults',
+		});
+	});
+
 	it('keeps the default text without the Assistant, and makes no model call', async () => {
 		const { tool, draftUrl } = await setup();
 		isAvailable.mockResolvedValue(false);
@@ -321,6 +346,79 @@ describe('POST /projects/:projectId/mcp-servers/:serverId/tools/:toolId/draft', 
 			draftSource: 'defaults',
 			brokenReason: 'not_published',
 		});
+	});
+
+	it('saves the drafted input descriptions of the first draft, and GET of the tool returns them', async () => {
+		const { tool, serverId, draftUrl } = await setup();
+		answer({
+			toolName: 'get_campaign_numbers',
+			description: 'Returns the numbers.',
+			inputDescriptions: { campaign_id: 'The ID of the campaign.', days: '' },
+		});
+
+		const response = await testServer.authAgentFor(editor).post(draftUrl).send({}).expect(200);
+
+		// A broken input description does not fail the draft.
+		expect(response.body.data).toMatchObject({
+			status: 'drafted',
+			tool: { toolName: 'get_campaign_numbers' },
+			inputDescriptions: { campaign_id: 'The ID of the campaign.' },
+		});
+		const [, prompt] = draft.mock.calls[0];
+		expect(prompt).toContain('"inputDescriptions"');
+		const detail = await testServer
+			.authAgentFor(editor)
+			.get(`${base(serverId)}/tools/${tool.id}`)
+			.expect(200);
+		expect(detail.body.data.inputs).toEqual([
+			{
+				name: 'campaign_id',
+				type: 'string',
+				description: 'The ID of the campaign.',
+				required: false,
+			},
+			{ name: 'days', type: 'number', description: '', required: false },
+		]);
+	});
+
+	it('returns the draft of one input description without saving it', async () => {
+		const { tool, serverId, draftUrl } = await setup();
+		answer({ inputDescription: 'The number of days, from 1 to 90.' });
+
+		const response = await testServer
+			.authAgentFor(editor)
+			.post(draftUrl)
+			.send({ field: 'inputDescription', inputName: 'days', persist: false })
+			.expect(200);
+
+		expect(response.body.data).toMatchObject({
+			status: 'drafted',
+			tool: { toolName: tool.toolName, description: tool.description },
+			inputDescriptions: { days: 'The number of days, from 1 to 90.' },
+		});
+		const detail = await testServer
+			.authAgentFor(editor)
+			.get(`${base(serverId)}/tools/${tool.id}`)
+			.expect(200);
+		expect(detail.body.data.inputs).toContainEqual({
+			name: 'days',
+			type: 'number',
+			description: '',
+			required: false,
+		});
+	});
+
+	it.each([
+		['without an input name', { field: 'inputDescription' }],
+		[
+			'for an input that the trigger does not declare',
+			{ field: 'inputDescription', inputName: 'nope' },
+		],
+	])('refuses the draft of an input description %s', async (_case, body) => {
+		const { draftUrl } = await setup();
+
+		await testServer.authAgentFor(editor).post(draftUrl).send(body).expect(400);
+		expect(draft).not.toHaveBeenCalled();
 	});
 
 	it('refuses an unknown field', async () => {

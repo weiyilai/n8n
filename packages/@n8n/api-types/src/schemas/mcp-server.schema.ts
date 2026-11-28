@@ -15,6 +15,9 @@ export const MCP_SERVER_SLUG_MAX_LENGTH = 64;
 export const MCP_SERVER_DESCRIPTION_MAX_LENGTH = 2000;
 export const MCP_SERVER_TOOL_NAME_MAX_LENGTH = 64;
 export const MCP_SERVER_TOOL_DESCRIPTION_MAX_LENGTH = 2000;
+export const MCP_SERVER_TOOL_INPUT_DESCRIPTION_MAX_LENGTH = 1000;
+/** The most input settings that one tool update can carry. */
+export const MCP_SERVER_TOOL_INPUTS_MAX_COUNT = 200;
 
 export const mcpServerNameSchema = z.string().trim().min(1).max(MCP_SERVER_NAME_MAX_LENGTH);
 
@@ -62,6 +65,19 @@ export const mcpServerToolDescriptionSchema = z
 	.trim()
 	.max(MCP_SERVER_TOOL_DESCRIPTION_MAX_LENGTH);
 
+/** AI clients read the description of an input to choose its value. */
+export const mcpServerToolInputDescriptionSchema = z
+	.string()
+	.trim()
+	.max(MCP_SERVER_TOOL_INPUT_DESCRIPTION_MAX_LENGTH);
+
+/** The settings of one trigger input of a workflow tool. */
+export const mcpServerToolInputSettingsSchema = z.object({
+	description: mcpServerToolInputDescriptionSchema,
+	required: z.boolean(),
+});
+export type McpServerToolInputSettings = z.infer<typeof mcpServerToolInputSettingsSchema>;
+
 export const mcpServerToolKindSchema = z.enum(['workflow', 'node', 'agent', 'skill']);
 export type McpServerToolKind = z.infer<typeof mcpServerToolKindSchema>;
 
@@ -69,8 +85,15 @@ export type McpServerToolKind = z.infer<typeof mcpServerToolKindSchema>;
 export const mcpServerToolDraftSourceSchema = z.enum(['ai', 'defaults', 'edited']);
 export type McpServerToolDraftSource = z.infer<typeof mcpServerToolDraftSourceSchema>;
 
-/** The fields that one "Generate" button writes again. */
-export const mcpServerToolDraftFieldSchema = z.enum(['toolName', 'description']);
+/**
+ * The fields that one "Generate" button writes again. `inputDescription` writes the description
+ * of one trigger input.
+ */
+export const mcpServerToolDraftFieldSchema = z.enum([
+	'toolName',
+	'description',
+	'inputDescription',
+]);
 export type McpServerToolDraftField = z.infer<typeof mcpServerToolDraftFieldSchema>;
 
 /**
@@ -191,6 +214,41 @@ export const mcpServerToolSchema = z.object({
 });
 export type McpServerToolResponse = z.infer<typeof mcpServerToolSchema>;
 
+export const mcpServerToolFieldTypeSchema = z.enum([
+	'string',
+	'number',
+	'boolean',
+	'array',
+	'object',
+	'any',
+]);
+export type McpServerToolFieldType = z.infer<typeof mcpServerToolFieldTypeSchema>;
+
+export const mcpServerToolFieldSchema = z.object({
+	name: z.string(),
+	type: mcpServerToolFieldTypeSchema,
+});
+export type McpServerToolField = z.infer<typeof mcpServerToolFieldSchema>;
+
+/** One trigger input of a workflow tool, with its settings. Without settings, both are empty. */
+export const mcpServerToolInputFieldSchema = mcpServerToolFieldSchema.extend(
+	mcpServerToolInputSettingsSchema.shape,
+);
+export type McpServerToolInputField = z.infer<typeof mcpServerToolInputFieldSchema>;
+
+/**
+ * Full details for one tool modal: the tool itself, the source name (for example the workflow
+ * name), its declared trigger inputs with their settings, and the output fields of its last
+ * successful execution.
+ * `outputs` is `null` when no readable successful execution exists.
+ */
+export const mcpServerToolDetailSchema = mcpServerToolSchema.extend({
+	sourceName: z.string().nullable(),
+	inputs: z.array(mcpServerToolInputFieldSchema),
+	outputs: z.array(mcpServerToolFieldSchema).nullable(),
+});
+export type McpServerToolDetailResponse = z.infer<typeof mcpServerToolDetailSchema>;
+
 export const mcpServerDetailSchema = mcpServerSchema.extend({
 	tools: z.array(mcpServerToolSchema),
 	/**
@@ -203,11 +261,13 @@ export type McpServerDetailResponse = z.infer<typeof mcpServerDetailSchema>;
 
 /**
  * The answer of a draft call. `not_available`: the n8n Assistant is off or has no model, so the
- * tool keeps its text.
+ * tool keeps its text. `inputDescriptions` has the drafted description of each input, by input
+ * name: every input for the draft after an add, one input for `field: 'inputDescription'`.
  */
 export const mcpServerToolDraftResponseSchema = z.object({
 	status: z.enum(['drafted', 'not_available']),
 	tool: mcpServerToolSchema,
+	inputDescriptions: z.record(z.string()).optional(),
 });
 export type McpServerToolDraftResponse = z.infer<typeof mcpServerToolDraftResponseSchema>;
 
@@ -265,6 +325,7 @@ export const MCP_SERVER_ACTION_SCOPES = {
 	delete: 'mcpServer:delete',
 	// The workflow picker and every tool change are a change of the server.
 	toolCandidates: 'mcpServer:update',
+	readTool: 'mcpServer:read',
 	addTools: 'mcpServer:update',
 	updateTool: 'mcpServer:update',
 	draftTool: 'mcpServer:update',

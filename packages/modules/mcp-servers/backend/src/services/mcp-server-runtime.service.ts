@@ -22,6 +22,12 @@ import {
 	type WorkflowToolRefusal,
 	type WorkflowToolRunResult,
 } from '../ports/workflow-tool.port';
+import {
+	applyInputSettings,
+	missingRequiredInputs,
+	readInputSettings,
+} from '../utils/mcp-server-tool-data';
+import { inputNamesOf } from '../utils/mcp-server-tool-draft';
 import { McpServerProtectedResource } from './mcp-server-protected-resource.service';
 import { McpServerRunCap } from './mcp-server-run-cap.service';
 
@@ -88,6 +94,13 @@ function isJsonObject(value: unknown): value is JSONObject {
 function toToolInputSchema(schema: WorkflowToolInputSchema): ToolInputSchema {
 	const { properties, ...rest } = schema;
 	return { ...rest, ...(isJsonObject(properties) && { properties }) };
+}
+
+function missingInputsMessage(names: string[]): string {
+	const list = names.map((name) => `"${name}"`).join(', ');
+	return names.length === 1
+		? `The required input ${list} is missing. Send a value for it.`
+		: `The required inputs ${list} are missing. Send a value for each.`;
 }
 
 function errorResult(text: string): CallToolResult {
@@ -183,7 +196,10 @@ export class McpServerRuntimeService {
 	private async inputSchema(server: McpServer, tool: McpServerTool): Promise<ToolInputSchema> {
 		if (tool.kind !== 'workflow' || !tool.targetId) return toToolInputSchema(ANY_INPUT);
 		const described = await this.workflows.describe(server.projectId, tool.targetId);
-		return toToolInputSchema(described.callable ? described.inputSchema : ANY_INPUT);
+		if (!described.callable) return toToolInputSchema(ANY_INPUT);
+		return toToolInputSchema(
+			applyInputSettings(described.inputSchema, readInputSettings(tool.toolData)),
+		);
 	}
 
 	private async callTool(
@@ -212,6 +228,11 @@ export class McpServerRuntimeService {
 	): Promise<CallOutcome | { invalidInput: string }> {
 		if (tool.kind !== 'workflow' || !tool.targetId) {
 			return { status: 'error', result: errorResult(REFUSAL_MESSAGES.not_found) };
+		}
+
+		const missing = await this.missingRequiredInputs(server, tool, tool.targetId, input);
+		if (missing.length > 0) {
+			return { status: 'error', result: errorResult(missingInputsMessage(missing)) };
 		}
 
 		const release = this.runCap.tryAcquire(server.id);
@@ -256,6 +277,24 @@ export class McpServerRuntimeService {
 			default:
 				return { status: 'error', result: errorResult(RUN_STATUS_MESSAGES[run.status]) };
 		}
+	}
+
+	/**
+	 * The required inputs that the call did not send. Only inputs that the published trigger still
+	 * declares count. Without a required input, the published version is not loaded.
+	 */
+	private async missingRequiredInputs(
+		server: McpServer,
+		tool: McpServerTool,
+		workflowId: string,
+		input: unknown,
+	): Promise<string[]> {
+		const settings = readInputSettings(tool.toolData);
+		if (![...settings.values()].some(({ required }) => required)) return [];
+		const described = await this.workflows.describe(server.projectId, workflowId);
+		// A broken tool goes on to the run, which returns the reason.
+		if (!described.callable) return [];
+		return missingRequiredInputs(input, settings, inputNamesOf(described.inputSchema));
 	}
 
 	private async trackCall(

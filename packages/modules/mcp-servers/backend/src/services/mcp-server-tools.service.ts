@@ -3,6 +3,7 @@ import {
 	mcpServerSchema,
 	type McpServerToolBrokenReason,
 	type McpServerToolCandidate,
+	type McpServerToolDetailResponse,
 	type McpServerToolDraftSource,
 	type McpServerToolDraftField,
 	type McpServerToolDraftResponse,
@@ -37,9 +38,18 @@ import {
 } from '../ports/workflow-tool.port';
 import type { McpServerActor, McpServerToolDraftStatus } from '../utils/mcp-server-events';
 import {
+	readInputSettings,
+	withInputSettings,
+	writeInputSettings,
+	type InputSettings,
+	type WorkflowToolData,
+} from '../utils/mcp-server-tool-data';
+import {
 	buildToolDraftPrompt,
+	inputNamesOf,
 	parseToolDraftAnswer,
 	type ToolDraft,
+	type ToolDraftRequest,
 } from '../utils/mcp-server-tool-draft';
 import { toToolName, uniqueToolName } from '../utils/mcp-server-tool-name';
 
@@ -113,6 +123,26 @@ function toToolResponse(
 	};
 }
 
+/**
+ * The new `toolData` with the drafted input descriptions, or `undefined` when nothing changes.
+ * Without `overwrite`, an input that has a description keeps it.
+ */
+function draftedInputSettings(
+	toolData: unknown,
+	inputDescriptions: Record<string, string>,
+	overwrite: boolean,
+): WorkflowToolData | undefined {
+	const settings: InputSettings = readInputSettings(toolData);
+	let changed = false;
+	for (const [name, description] of Object.entries(inputDescriptions)) {
+		const setting = settings.get(name);
+		if (setting?.description && !overwrite) continue;
+		settings.set(name, { description, required: setting?.required ?? false });
+		changed = true;
+	}
+	return changed ? writeInputSettings(settings) : undefined;
+}
+
 /** The tools of a server: the workflow picker, add, edit, and remove. */
 @Service()
 export class McpServerToolsService {
@@ -155,6 +185,36 @@ export class McpServerToolsService {
 	): Promise<McpServerToolResponse> {
 		const tool = await this.findTool(projectId, serverId, toolId);
 		return toToolResponse(tool, await this.brokenReason(projectId, tool));
+	}
+
+	/**
+	 * One tool with its source name, trigger inputs, and output fields from the last successful
+	 * execution. Reads only the data that `user` can already see.
+	 */
+	async getToolDetail(
+		user: User,
+		projectId: string,
+		serverId: string,
+		toolId: string,
+	): Promise<McpServerToolDetailResponse> {
+		const tool = await this.findTool(projectId, serverId, toolId);
+		if (tool.kind === 'workflow' && tool.targetId) {
+			const [brokenReason, inspection] = await Promise.all([
+				this.brokenReason(projectId, tool),
+				this.workflows.inspect(projectId, tool.targetId, user),
+			]);
+			return {
+				...toToolResponse(tool, brokenReason),
+				...inspection,
+				inputs: withInputSettings(inspection.inputs, readInputSettings(tool.toolData)),
+			};
+		}
+		return {
+			...toToolResponse(tool, null),
+			sourceName: null,
+			inputs: [],
+			outputs: null,
+		};
 	}
 
 	/** The names of these workflows of the project, with no check. Unknown IDs are left out. */
@@ -309,6 +369,7 @@ export class McpServerToolsService {
 	/**
 	 * `draftSource` says who wrote the new text, so the analysis of AI drafts sees it: `edited`
 	 * for the builder in the UI, `ai` for the n8n Assistant after the approval of the builder.
+	 * A change of only the input settings keeps `draftSource`, because it is not the tool text.
 	 */
 	async updateTool(
 		projectId: string,
@@ -318,21 +379,58 @@ export class McpServerToolsService {
 		draftSource: Extract<McpServerToolDraftSource, 'ai' | 'edited'> = 'edited',
 	): Promise<McpServerToolResponse> {
 		const tool = await this.findTool(projectId, serverId, toolId);
-		const hasChanges = changes.toolName !== undefined || changes.description !== undefined;
-		const updated = hasChanges
-			? await this.tools.updateInServer(tool.serverId, tool.id, {
-					...changes,
-					draftSource,
-				})
-			: tool;
+		const { inputs, ...textChanges } = changes;
+		const textChanged = textChanges.toolName !== undefined || textChanges.description !== undefined;
+		const toolData =
+			inputs && Object.keys(inputs).length > 0
+				? await this.inputSettingsChange(projectId, tool, inputs)
+				: undefined;
+		const update: McpServerToolChanges = {
+			...textChanges,
+			...(textChanged && { draftSource }),
+			...(toolData && { toolData }),
+		};
+		const updated =
+			textChanged || toolData
+				? await this.tools.updateInServer(tool.serverId, tool.id, update)
+				: tool;
 		if (!updated) throw new McpServerToolNotFoundError();
 		return toToolResponse(updated, await this.brokenReason(projectId, updated));
 	}
 
 	/**
-	 * Writes the tool name and the description with the n8n Assistant, in one model call. With
-	 * `field`, only that field changes. Without the Assistant, the tool keeps its text. A draft
-	 * that breaks the rules gives an error, and the tool keeps its text.
+	 * The new `toolData` with the given input settings, or `undefined` when no given input is in
+	 * the trigger. Names that the trigger does not declare are ignored. Other inputs keep their
+	 * settings.
+	 */
+	private async inputSettingsChange(
+		projectId: string,
+		tool: McpServerTool,
+		inputs: NonNullable<UpdateMcpServerToolDto['inputs']>,
+	): Promise<WorkflowToolData | undefined> {
+		if (tool.kind !== 'workflow' || !tool.targetId) {
+			throw new BadRequestError('Only a workflow tool has input settings.');
+		}
+		const declared = new Set(
+			(await this.workflows.listInputs(projectId, tool.targetId)).map(({ name }) => name),
+		);
+		const settings = readInputSettings(tool.toolData);
+		let changed = false;
+		for (const [name, setting] of Object.entries(inputs)) {
+			if (!declared.has(name)) continue;
+			settings.set(name, setting);
+			changed = true;
+		}
+		return changed ? writeInputSettings(settings) : undefined;
+	}
+
+	/**
+	 * Writes the tool name, the description, and the description of each input with the n8n
+	 * Assistant, in one model call. With `field`, only that field changes: for `inputDescription`,
+	 * the description of the input `inputName`. With `persist: false`, returns the drafted text
+	 * without saving it to the database so a modal can apply it only on Save. Without the
+	 * Assistant, the tool keeps its text. A draft that breaks the rules gives an error, and the
+	 * tool keeps its text.
 	 */
 	async draftTool(
 		user: User,
@@ -341,6 +439,7 @@ export class McpServerToolsService {
 		toolId: string,
 		actor: McpServerActor,
 		field?: McpServerToolDraftField,
+		options?: { persist?: boolean; inputName?: string },
 	): Promise<McpServerToolDraftResponse> {
 		const tool = await this.findTool(projectId, serverId, toolId);
 		const track = (status: McpServerToolDraftStatus) =>
@@ -367,6 +466,28 @@ export class McpServerToolsService {
 			);
 		}
 
+		const declaredInputs = inputNamesOf(described.inputSchema);
+		const settings = readInputSettings(tool.toolData);
+		const current = { toolName: tool.toolName, description: tool.description };
+		let request: ToolDraftRequest | undefined;
+		let inputNames = declaredInputs;
+		if (field === 'inputDescription') {
+			const inputName = options?.inputName;
+			if (inputName === undefined || !declaredInputs.includes(inputName)) {
+				throw new BadRequestError(
+					`The trigger of the workflow has no input "${inputName ?? ''}", so n8n cannot write a draft.`,
+				);
+			}
+			inputNames = [inputName];
+			request = {
+				field,
+				current,
+				input: { name: inputName, description: settings.get(inputName)?.description ?? '' },
+			};
+		} else if (field) {
+			request = { field, current };
+		}
+
 		const prompt = buildToolDraftPrompt(
 			{
 				workflowName: described.name,
@@ -374,9 +495,7 @@ export class McpServerToolsService {
 				inputSchema: described.inputSchema,
 				nodeNames: described.nodeNames,
 			},
-			field
-				? { field, current: { toolName: tool.toolName, description: tool.description } }
-				: undefined,
+			request,
 		);
 		let result: TextDraftResult;
 		try {
@@ -396,7 +515,7 @@ export class McpServerToolsService {
 			);
 		}
 
-		const answer = parseToolDraftAnswer(result.text, field);
+		const answer = parseToolDraftAnswer(result.text, field, inputNames);
 		if (!answer.ok) {
 			this.logger.warn('The draft of a custom MCP server tool broke the rules', {
 				serverId: tool.serverId,
@@ -406,15 +525,58 @@ export class McpServerToolsService {
 			track('invalid_answer');
 			throw new McpServerToolDraftUnavailableError(answer.error);
 		}
-		const updated = await this.saveDraft(tool, answer.draft);
+		const updated =
+			options?.persist === false
+				? await this.previewDraft(tool, answer.draft)
+				: await this.saveDraft(tool, answer.draft, field);
 		track('drafted');
-		return { status: 'drafted', tool: toToolResponse(updated, null) };
+		return {
+			status: 'drafted',
+			tool: toToolResponse(updated, null),
+			...(answer.draft.inputDescriptions && {
+				inputDescriptions: answer.draft.inputDescriptions,
+			}),
+		};
 	}
 
-	/** A drafted name that another tool of the server has gets `_2`, `_3`, and so on. */
-	private async saveDraft(tool: McpServerTool, draft: ToolDraft): Promise<McpServerTool> {
+	/** Builds the drafted tool response without persisting it, still avoiding sibling name collisions. */
+	private async previewDraft(tool: McpServerTool, draft: ToolDraft): Promise<McpServerTool> {
+		let toolName = tool.toolName;
+		if (draft.toolName !== undefined) {
+			const others = await this.tools.listByServer(tool.serverId);
+			const taken = new Set(
+				others.filter((other) => other.id !== tool.id).map((other) => other.toolName),
+			);
+			toolName = uniqueToolName(draft.toolName, taken);
+		}
+		return {
+			...tool,
+			toolName,
+			description: draft.description ?? tool.description,
+			draftSource: 'ai',
+		};
+	}
+
+	/**
+	 * A drafted name that another tool of the server has gets `_2`, `_3`, and so on. The first
+	 * draft (no `field`) writes an input description only where the builder has none.
+	 */
+	private async saveDraft(
+		tool: McpServerTool,
+		draft: ToolDraft,
+		field?: McpServerToolDraftField,
+	): Promise<McpServerTool> {
+		const { inputDescriptions, ...text } = draft;
+		const toolData = inputDescriptions
+			? draftedInputSettings(tool.toolData, inputDescriptions, field === 'inputDescription')
+			: undefined;
 		for (let attempt = 1; ; attempt++) {
-			const changes: McpServerToolChanges = { ...draft, draftSource: 'ai' };
+			const changes: McpServerToolChanges = {
+				...text,
+				// The description of one input is not the tool text.
+				...(field !== 'inputDescription' && { draftSource: 'ai' }),
+				...(toolData && { toolData }),
+			};
 			if (draft.toolName !== undefined) {
 				const others = await this.tools.listByServer(tool.serverId);
 				const taken = new Set(
